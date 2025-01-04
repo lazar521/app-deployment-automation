@@ -1,0 +1,53 @@
+---
+- name: Install Docker and Docker Compose (Debian)
+  hosts: all
+  become: true
+
+
+  tasks:
+    - name: Wait for connection
+      wait_for_connection:
+        connect_timeout: 5
+        sleep: 5
+        timeout: 60
+
+    - name: Gather facts manually
+      setup:
+
+    - name: Install gcloud and ensure apt cache is up to date 
+      apt:
+        name: google-cloud-sdk
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Stop the container
+      community.docker.docker_container:
+        name: "{{ lookup('env', 'IMAGE_NAME') }}"
+        state: absent
+    
+    - name: Authenticate Docker with Artifact Registry
+      shell: gcloud auth configure-docker "{{ lookup('env', 'GAR_REGION') }}" --quiet
+      environment:
+        CLOUDSDK_CORE_PROJECT: "{{ lookup('env', 'PROJECT_ID') }}"
+      args:
+        creates: ~/.docker/config.json
+
+    - name: Start new version
+      community.docker.docker_container:
+        image: "{{ lookup('env', 'GAR_URL') }}/{{ lookup('env', 'IMAGE_NAME') }}:{{ lookup('env', 'IMAGE_TAG') }}"
+        pull: true
+        ports:
+          - "80:8080"
+        name: "{{ lookup('env', 'IMAGE_NAME') }}"
+        env:
+          MYSQL_URL: "{{ lookup('env', 'MYSQL_URL') }}"
+          MYSQL_USER: "{{ lookup('env', 'MYSQL_USER') }}"
+          MYSQL_PASS: "{{ lookup('env', 'MYSQL_PASS') }}"
+          DATABASE: "{{ lookup('env', 'DATABASE') }}"
+          SPRING_PROFILES_ACTIVE: "{{ lookup('env', 'DATABASE') }}"

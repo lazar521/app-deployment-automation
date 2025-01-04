@@ -1,0 +1,103 @@
+name: Pull request build and push
+
+on:
+  workflow_dispatch:
+
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
+      - opened
+
+env:
+  IMAGE_NAME: spring-petclinic
+
+jobs:
+  spell-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v4  
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+      
+      - name: Run Checkstyle
+        continue-on-error: true
+        run: |
+          ./mvnw checkstyle:check --quiet
+
+      - name: Upload Checkstyle result as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkstyle-result.html
+          path: ./target/checkstyle-result.xml
+
+  testing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+      
+      - name: Run tests
+        continue-on-error: true
+        run: |
+          ./mvnw clean package -Dcheckstyle.skip 
+
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v4  
+
+      - name: Auth to GCP
+        id: auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.WIF_URL }}
+          service_account: ${{ secrets.TF_SA }}
+          create_credentials_file: true
+          token_format: access_token
+          access_token_lifetime: "360s"
+
+
+      - name: Login to GAR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.GAR_URL }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+          
+      - name: Get short commit SHA
+        id: getsha
+        run: |
+          echo "shortSha=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6  
+        with:
+          push: true
+          tags: ${{ secrets.GAR_URL }}/${{ env.IMAGE_NAME }}:${{ steps.getsha.outputs.shortSha }}

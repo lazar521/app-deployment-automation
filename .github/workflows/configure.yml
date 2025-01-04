@@ -1,0 +1,90 @@
+name: Configure Virtual Machines
+
+on:
+  workflow_dispatch:
+    inputs:
+      database:
+        type: choice
+        description: "Database"
+        options:
+          - mysql
+          - h2
+      sql_instance_name:
+        type: string
+        description: "Database name (mysql)"
+        required: false
+        default: main-database
+      image_tag:
+        type: string
+        description: "Image tag"
+        default: latest
+
+env:
+  IMAGE_NAME: spring-petclinic
+
+jobs:
+  configure-vms:
+    runs-on: actions-runner
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: ./ansible
+
+    steps:
+      - name: Checkout the repo
+        uses: actions/checkout@v4 
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Auth to GCP
+        uses: 'google-github-actions/auth@v2'
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.WIF_URL }}
+          service_account: ${{ secrets.TF_SA }}
+          create_credentials_file: true
+          token_format: access_token
+          access_token_lifetime: "360s"
+
+      - name: List VMs and find database IP
+        run: |
+          DB_IP="$(gcloud sql instances list --filter=name=${{ inputs.sql_instance_name }} --format="json(ipAddresses)" | \
+          jq -r '.[].ipAddresses[] | select(.type == "PRIVATE") | .ipAddress')"
+
+          if [ -z "$DB_IP" ]; then
+            echo "Error: Private IP for '${{ inputs.sql_instance_name }}' not found."
+            exit 1
+          fi
+
+          echo "mysql_ip=$DB_IP" >> $GITHUB_ENV
+
+          echo "[webservers]" > hosts.ini
+          gcloud compute instances list  --filter="labels.type=webserver" --format="json(name, networkInterfaces[0].networkIP)" | \
+          jq -r '.[] | "\(.networkInterfaces[0].networkIP)"' >> hosts.ini
+
+          cat hosts.ini
+
+      - name: Setup Ansible and extract GAR region
+        run: |
+          sudo apt update
+          sudo apt install ansible -y 
+          echo "GAR_REGION=$( echo -n '${{ secrets.GAR_URL }}' | cut -d / -f 1)" >> $GITHUB_ENV
+
+      - name: Run playbook
+        env: 
+          MYSQL_URL: ${{ env.mysql_ip }}
+          MYSQL_USER: ${{ secrets.DB_USERNAME }}
+          MYSQL_PASS: ${{ secrets.DB_PASSWORD }}
+          DATABASE: ${{ inputs.database }}
+          GAR_URL: ${{ secrets.GAR_URL }}
+          PROJECT_ID: ${{ secrets.PROJECT_ID }}
+          GAR_REGION: ${{ env.GAR_REGION }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          echo '${{ secrets.ANSIBLE_PRIV_KEY }}' > ssh_rsa
+          chmod 600 ssh_rsa
+          ansible-playbook --verbose --private-key ./ssh_rsa startapp.yml -i hosts.ini
